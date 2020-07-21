@@ -1,0 +1,88 @@
+library(dcm2niir)
+library(dcmtk)
+library(readr)
+library(dplyr)
+library(tidyr)
+library(neurobase)
+
+## source directory
+directory_source<-"D:/MDRP/stage_2_test"
+
+## destination directory
+directory_destination<-"D:/MDRP/train_corrected"
+
+## see if folder exist else create a new folder
+if(!file.exists(directory_destination)) dir.create(directory_destination)
+
+## list of folders inside sorce data
+list_folders<-list.files(directory_source)    ## all the folders inside test
+
+## loop over all the folders one by one
+for(iFolder in list_folders){
+  
+  print(paste("accessing the folder:",iFolder))
+
+  ## create the same folder in the destination folder
+  dir.create(paste0(directory_destination,"/",iFolder))
+  
+  ## copy all the files from this folder to destination folder
+  src_fldr<-paste0(directory_source,"/",iFolder)
+  dst_flrdr<-paste0(directory_destination)
+  
+  ## copy all the files to the destination folder
+  file.copy(src_fldr,dst_flrdr,recursive = T)
+  
+  hdr = read_dicom_header(path = paste0(dst_flrdr,"/",iFolder), recursive = TRUE)
+  wide = wide_hdr(hdr)
+  sort(unique(hdr$name))
+  
+  any(grepl("ilt", tolower(hdr$name)))
+  any(grepl("instancenum", tolower(hdr$name)))
+  
+  sub_bracket = function(x) {
+    x = sub("^\\[", "", x)
+    x = sub("\\]$", "", x)
+    x = trimws(x)
+  }
+  parse_number_no_na = function(x) {
+    x[ x %in% c("-", "-", "N/A")] = NA
+    na_x = is.na(x)
+    x = readr::parse_number(x, na = "")
+    bad = is.na(x) & !na_x 
+    stopifnot(!any(bad))
+    x
+  }
+  
+  wide = wide %>% 
+    mutate(ipp = sub_bracket(gsub("\\\\", ",", ImagePositionPatient))) %>% 
+    tidyr::separate(ipp, into = c("x", "y", "z"), remove = FALSE, sep = ",") %>% 
+    mutate_at(vars(x, y, z), parse_number_no_na)
+  
+  # order by z
+  wide = wide %>% 
+    select(file, x, y, z, ipp) %>% 
+    arrange(z)
+  
+  wide %>% 
+    mutate(file = basename(file)) %>% 
+    select(file, x, y, z) %>% 
+    as.data.frame
+  
+  tmp_paths = file.path(paste0(dst_flrdr,"/",iFolder), basename(wide$file))
+  ind = seq_along(tmp_paths)
+  add_instance = function(file, index) {
+    dcmtk::dcmodify(
+      file = file,
+      frontopts = paste0('-i "(0020,0013)=', index, '"')
+    )
+    hdr = read_dicom_header(file)
+    new_inst = as.numeric(sub_bracket(hdr$value[hdr$name == "InstanceNumber"]))
+    stopifnot(new_inst == index)
+    print(new_inst)
+    bakfile = paste0(file, ".bak")
+    if (file.exists(bakfile)) {
+      file.remove(bakfile)
+    }
+  }
+  res = mapply(add_instance, tmp_paths, ind)
+}
